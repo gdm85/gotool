@@ -65,10 +65,65 @@ func matchPattern(pattern string) func(name string) bool {
 	}
 }
 
+// hasPathPrefix reports whether the path s begins with the
+// elements in prefix.
+func hasPathPrefix(s, prefix string) bool {
+	switch {
+	default:
+		return false
+	case len(s) == len(prefix):
+		return s == prefix
+	case len(s) > len(prefix):
+		if prefix != "" && prefix[len(prefix)-1] == '/' {
+			return strings.HasPrefix(s, prefix)
+		}
+		return s[len(prefix)] == '/' && s[:len(prefix)] == prefix
+	}
+}
+
+// hasFilePathPrefix reports whether the filesystem path s begins with the
+// elements in prefix.
+func hasFilePathPrefix(s, prefix string) bool {
+	sv := strings.ToUpper(filepath.VolumeName(s))
+	pv := strings.ToUpper(filepath.VolumeName(prefix))
+	s = s[len(sv):]
+	prefix = prefix[len(pv):]
+	switch {
+	default:
+		return false
+	case sv != pv:
+		return false
+	case len(s) == len(prefix):
+		return s == prefix
+	case len(s) > len(prefix):
+		if prefix != "" && prefix[len(prefix)-1] == filepath.Separator {
+			return strings.HasPrefix(s, prefix)
+		}
+		return s[len(prefix)] == filepath.Separator && s[:len(prefix)] == prefix
+	}
+}
+
+// treeCanMatchPattern(pattern)(name) reports whether
+// name or children of name can possibly match pattern.
+// Pattern is the same limited glob accepted by matchPattern.
+func treeCanMatchPattern(pattern string) func(name string) bool {
+	wildCard := false
+	if i := strings.Index(pattern, "..."); i >= 0 {
+		wildCard = true
+		pattern = pattern[:i]
+	}
+	return func(name string) bool {
+		return len(name) <= len(pattern) && hasPathPrefix(pattern, name) ||
+			wildCard && strings.HasPrefix(name, pattern)
+	}
+}
+
 func (c Context) matchPackages(pattern string) []string {
 	match := func(string) bool { return true }
-	if pattern != "all" && pattern != "std" {
+	treeCanMatch := func(string) bool { return true }
+	if pattern != "all" && pattern != "std" && pattern != "cmd" {
 		match = matchPattern(pattern)
+		treeCanMatch = treeCanMatchPattern(pattern)
 	}
 
 	have := map[string]bool{
@@ -80,11 +135,15 @@ func (c Context) matchPackages(pattern string) []string {
 	var pkgs []string
 
 	for _, src := range c.BuildContext.SrcDirs() {
-		if pattern == "std" && src != gorootSrcPkg {
+		if (pattern == "std" || pattern == "cmd") && src != gorootSrcPkg {
 			continue
 		}
 		src = filepath.Clean(src) + string(filepath.Separator)
-		filepath.Walk(src, func(path string, fi os.FileInfo, err error) error {
+		root := src
+		if pattern == "cmd" {
+			root += "cmd" + string(filepath.Separator)
+		}
+		filepath.Walk(root, func(path string, fi os.FileInfo, err error) error {
 			if err != nil || !fi.IsDir() || path == src {
 				return nil
 			}
@@ -96,7 +155,13 @@ func (c Context) matchPackages(pattern string) []string {
 			}
 
 			name := filepath.ToSlash(path[len(src):])
-			if pattern == "std" && strings.Contains(name, ".") {
+			if pattern == "std" && (strings.Contains(name, ".") || name == "cmd") {
+				// The name "std" is only the standard library.
+				// If the name has a dot, assume it's a domain name for go get,
+				// and if the name is cmd, it's the root of the command tree.
+				return filepath.SkipDir
+			}
+			if !treeCanMatch(name) {
 				return filepath.SkipDir
 			}
 			if have[name] {
